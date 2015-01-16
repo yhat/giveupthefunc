@@ -137,6 +137,8 @@ func doMain() error {
 	return nil
 }
 
+var phiVisited = []*ssa.Phi{}
+
 func WalkInstr(v Visitor, ins ssa.Instruction) {
 	if ins == nil || v == nil {
 		return
@@ -205,10 +207,16 @@ func WalkInstr(v Visitor, ins ssa.Instruction) {
 		WalkValue(v, x.Iter)
 	case *ssa.Panic:
 		WalkValue(v, x.X)
-	// case *ssa.Phi:
-	// 	for i := range x.Edges {
-	//		WalkValue(v, x.Edges[i])
-	//	}
+	case *ssa.Phi:
+		for _, addr := range phiVisited {
+			if addr == x {
+				return
+			}
+		}
+		phiVisited = append(phiVisited, x)
+		for _, edge := range x.Edges {
+			WalkValue(v, edge)
+		}
 	case *ssa.Range:
 		WalkValue(v, x.X)
 	case *ssa.Return:
@@ -318,10 +326,16 @@ func WalkValue(v Visitor, val ssa.Value) {
 		WalkValue(v, x.Cap)
 	case *ssa.Next:
 		WalkValue(v, x.Iter)
-	// case *ssa.Phi:
-	//	for i := range x.Edges {
-	//		WalkValue(v, x.Edges[i])
-	//	}
+	case *ssa.Phi:
+		for _, addr := range phiVisited {
+			if addr == x {
+				return
+			}
+		}
+		phiVisited = append(phiVisited, x)
+		for _, edge := range x.Edges {
+			WalkValue(v, edge)
+		}
 	case *ssa.Range:
 		WalkValue(v, x.X)
 	case *ssa.Select:
