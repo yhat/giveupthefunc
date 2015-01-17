@@ -11,6 +11,7 @@ import (
 
 	"golang.org/x/tools/go/loader"
 	"golang.org/x/tools/go/ssa"
+	"golang.org/x/tools/go/ssa/ssautil"
 )
 
 var (
@@ -53,10 +54,12 @@ type CallCounter struct {
 }
 
 func (c *CallCounter) VisitInstr(ins ssa.Instruction) Visitor {
+	// fmt.Printf("INSTR %s %s\n", reflect.TypeOf(ins), ins)
 	return c
 }
 
 func (c *CallCounter) VisitValue(val ssa.Value) Visitor {
+	// fmt.Printf("VALUE %s %s\n", reflect.TypeOf(val), val)
 	switch x := val.(type) {
 	case *ssa.Function:
 		rel := x.RelString(nil)
@@ -84,6 +87,7 @@ func doMain() error {
 	}
 	prog := ssa.Create(program, 0)
 	prog.BuildAll()
+	funs := ssautil.AllFunctions(prog)
 	pkgs := prog.AllPackages()
 	calls := map[string]int{}
 	v := &CallCounter{calls}
@@ -92,28 +96,33 @@ func doMain() error {
 		if !pkgRegexp.MatchString(pkgPath) {
 			continue
 		}
-		fmt.Printf("ANALYZING %s\n", pkgPath)
-		for _, member := range pkg.Members {
-			m, ok := member.(*ssa.Function)
-			if !ok {
+		for f, _ := range funs {
+			if f == nil {
 				continue
 			}
-			rel := m.RelString(nil)
-			if _, ok := calls[rel]; !ok {
+			if f.Pkg == nil {
+				continue
+			}
+			if f.Pkg.Object.Path() != pkgPath {
+				continue
+			}
+			rel := f.RelString(nil)
+			_, ok := calls[rel]
+			if !ok {
 				calls[rel] = 0
 			}
-			for _, block := range m.Blocks {
+			for _, block := range f.Blocks {
 				for i := range block.Instrs {
 					WalkInstr(v, block.Instrs[i])
 				}
 			}
-			if m.Recover != nil {
-				for i := range m.Recover.Instrs {
-					WalkInstr(v, m.Recover.Instrs[i])
+			if f.Recover != nil {
+				for i := range f.Recover.Instrs {
+					WalkInstr(v, f.Recover.Instrs[i])
 				}
 			}
-			for i := range m.AnonFuncs {
-				WalkValue(v, m.AnonFuncs[i])
+			for i := range f.AnonFuncs {
+				WalkValue(v, f.AnonFuncs[i])
 			}
 		}
 	}
@@ -128,6 +137,9 @@ func doMain() error {
 	formatter := fmt.Sprintf("%%0%dd %%s", max)
 	s := []string{}
 	for name, n := range calls {
+		if strings.Contains(name, "$") {
+			continue
+		}
 		s = append(s, fmt.Sprintf(formatter, n, name))
 	}
 	sort.Strings(s)
@@ -137,6 +149,7 @@ func doMain() error {
 	return nil
 }
 
+// Hack to avoid infinite recursion
 var phiVisited = []*ssa.Phi{}
 
 func WalkInstr(v Visitor, ins ssa.Instruction) {
@@ -168,12 +181,16 @@ func WalkInstr(v Visitor, ins ssa.Instruction) {
 		WalkValue(v, x.X)
 	case *ssa.DebugRef:
 		WalkValue(v, x.X)
+	case *ssa.Defer:
+		WalkValue(v, x.Call.Value)
 	case *ssa.Extract:
 		WalkValue(v, x.Tuple)
 	case *ssa.Field:
 		WalkValue(v, x.X)
 	case *ssa.FieldAddr:
 		WalkValue(v, x.X)
+	case *ssa.Go:
+		WalkValue(v, x.Call.Value)
 	case *ssa.If:
 		WalkValue(v, x.Cond)
 	case *ssa.Index:

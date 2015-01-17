@@ -21,24 +21,23 @@ github repos.
 $ giveupthefunc -p='github.com/ericchiang' github.com/ericchiang/pup
 ANALYZING github.com/ericchiang/pup
 USAGE:
+000 (github.com/ericchiang/pup.AttrDisplayer).Display
+000 (github.com/ericchiang/pup.TreeDisplayer).Display
 000 github.com/ericchiang/pup.init
-000 github.com/ericchiang/pup.isVoidElement
 000 github.com/ericchiang/pup.main
-001 bytes.init
-001 encoding/json.init
-001 fmt.Println
-001 fmt.init
-001 github.com/ericchiang/pup.PrintHelp
-001 github.com/ericchiang/pup.SelectFromChildren
-001 github.com/ericchiang/pup.SelectNextSibling
-001 github.com/ericchiang/pup.init#1
-001 github.com/fatih/color.init
+001 (github.com/ericchiang/pup.JSONDisplayer).Display
+001 (github.com/ericchiang/pup.TextDisplayer).Display
 ...
+028 github.com/ericchiang/pup.ParseClassMatcher
+028 github.com/ericchiang/pup.ParseIdMatcher
+028 github.com/ericchiang/pup.ParsePseudo
+033 strconv.Atoi
 051 (*regexp.Regexp).FindAllStringSubmatch
 054 (*bytes.Buffer).WriteRune
-070 regexp.MustCompile
-082 fmt.Errorf
-137 (*bytes.Buffer).String
+086 regexp.MustCompile
+088 fmt.Errorf
+089 regexp.QuoteMeta
 201 strings.IndexRune
-254 (*text/scanner.Scanner).Next
+205 (*bytes.Buffer).String
+265 (*text/scanner.Scanner).Next
 ```
