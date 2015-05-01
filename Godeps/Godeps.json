@@ -1,0 +1,34 @@
+{
+	"ImportPath": "github.com/yhat/giveupthefunc",
+	"GoVersion": "go1.4.2",
+	"Deps": [
+		{
+			"ImportPath": "golang.org/x/tools/go/ast/astutil",
+			"Rev": "a27f5b3448cac6aa82f9fd4c1d71dc245593ddd5"
+		},
+		{
+			"ImportPath": "golang.org/x/tools/go/buildutil",
+			"Rev": "a27f5b3448cac6aa82f9fd4c1d71dc245593ddd5"
+		},
+		{
+			"ImportPath": "golang.org/x/tools/go/exact",
+			"Rev": "a27f5b3448cac6aa82f9fd4c1d71dc245593ddd5"
+		},
+		{
+			"ImportPath": "golang.org/x/tools/go/gcimporter",
+			"Rev": "a27f5b3448cac6aa82f9fd4c1d71dc245593ddd5"
+		},
+		{
+			"ImportPath": "golang.org/x/tools/go/loader",
+			"Rev": "a27f5b3448cac6aa82f9fd4c1d71dc245593ddd5"
+		},
+		{
+			"ImportPath": "golang.org/x/tools/go/ssa",
+			"Rev": "a27f5b3448cac6aa82f9fd4c1d71dc245593ddd5"
+		},
+		{
+			"ImportPath": "golang.org/x/tools/go/types",
+			"Rev": "a27f5b3448cac6aa82f9fd4c1d71dc245593ddd5"
+		}
+	]
+}

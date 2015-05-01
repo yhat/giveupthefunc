@@ -75,9 +75,7 @@ func (c *CallCounter) VisitValue(val ssa.Value) Visitor {
 }
 
 func doMain() error {
-	config := &loader.Config{
-		SourceImports: true,
-	}
+	config := &loader.Config{}
 	if _, err := config.FromArgs(flag.Args(), false); err != nil {
 		return fmt.Errorf("cloud not get package from args: %s", flag.Args())
 	}
