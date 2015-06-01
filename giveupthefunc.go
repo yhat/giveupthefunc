@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"os"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
@@ -12,125 +13,203 @@ import (
 	"golang.org/x/tools/go/loader"
 	"golang.org/x/tools/go/ssa"
 	"golang.org/x/tools/go/ssa/ssautil"
+	"golang.org/x/tools/go/types"
 )
 
-var (
-	gopath    string
-	goroot    string
-	pkgRegexp *regexp.Regexp
-)
-
-func init() {
-	gopath = os.Getenv("GOPATH")
-	if gopath == "" {
-		fmt.Fprintf(os.Stderr, "ERROR: GOPATH environment not found\n")
-		os.Exit(2)
-	}
-	goroot = os.Getenv("GOROOT")
-	if goroot == "" {
-		fmt.Fprintf(os.Stderr, "ERROR: GOROOT environment not found\n")
-		os.Exit(2)
-	}
-	var re string
-	flag.StringVar(&re, "p", `\.`, "package name regexp to include in analysis")
-	flag.Parse()
-	pkgRegexp = regexp.MustCompile(re)
-}
+var usage = `giveupthefunc [flags] [list of packages]`
 
 func main() {
-	if err := doMain(); err != nil {
-		fmt.Fprintf(os.Stderr, "gofunk: %s\n", err)
+	err := doMain()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "giveupthefunc: %s\n", err)
 		os.Exit(1)
 	}
 }
 
-type Visitor interface {
-	VisitInstr(ssa.Instruction) Visitor
-	VisitValue(ssa.Value) Visitor
+// Generate the list of standard packages
+//go:generate /bin/bash -c ./genpkgs.sh
+
+// List the package paths of a given type. Because types can sometimes be
+// struct compositions of several types, it's possible to return more than
+// one package path.
+func typePackages(t types.Type) []string {
+	switch t := t.(type) {
+	case *types.Named:
+		return []string{t.Obj().Pkg().Path()}
+	case *types.Pointer:
+		return typePackages(t.Elem())
+	case *types.Struct:
+		pkgs := []string{}
+		for i := 0; i < t.NumFields(); i++ {
+			pkgs = append(pkgs, typePackages(t.Field(i).Type())...)
+		}
+		return pkgs
+	default:
+		msg := fmt.Sprintf("unexpected type %s", reflect.TypeOf(t))
+		panic(msg)
+	}
 }
 
-type CallCounter struct {
-	calls map[string]int
+// List the package paths of the type acting on a function.
+func funcPackages(fn *ssa.Function) []string {
+	if pkg := fn.Package(); pkg != nil {
+		return []string{pkg.Object.Path()}
+	}
+
+	recv := fn.Signature.Recv()
+	if recv == nil {
+		if len(fn.FreeVars) == 1 {
+			// it's a '$bound'
+			fv := fn.FreeVars[0].Type()
+			return typePackages(fv)
+		} else if len(fn.Params) > 0 {
+			// it's a '$thunk'
+			recv := fn.Params[0].Type()
+			return typePackages(recv)
+		}
+		panic("type had no free variables or params")
+	}
+
+	return typePackages(recv.Type())
 }
 
-func (c *CallCounter) VisitInstr(ins ssa.Instruction) Visitor {
-	// fmt.Printf("INSTR %s %s\n", reflect.TypeOf(ins), ins)
-	return c
+// Function names sometimes show up twice. For instance
+//    (*github.com/yhat/giveupthefunc/test.Foo).UsedInAnon
+//    (github.com/yhat/giveupthefunc/test.Foo).UsedInAnon
+// To standardize these, always remove the star.
+func funcName(fn *ssa.Function) string {
+	return strings.Replace(fn.RelString(nil), "*", "", 1)
 }
 
-func (c *CallCounter) VisitValue(val ssa.Value) Visitor {
-	// fmt.Printf("VALUE %s %s\n", reflect.TypeOf(val), val)
-	switch x := val.(type) {
-	case *ssa.Function:
-		rel := x.RelString(nil)
-		if strings.Contains(rel, "$") {
-			return c
-		} else {
-			c.calls[rel]++
-			return nil
+// is the function in the standard library?
+func inStandardPackages(fn *ssa.Function) bool {
+	pkgs := funcPackages(fn)
+	for _, pkg := range pkgs {
+		_, ok := stdPkgs[pkg]
+		if !ok {
+			return false
 		}
 	}
-	return c
-
+	return true
 }
 
+var (
+	includeStdPkgs bool
+	usagesMatcher  *regexp.Regexp
+	scopeMatcher   *regexp.Regexp
+)
+
 func doMain() error {
+
+	var analysisScope string
+	var usages string
+
+	flag.StringVar(&usages, "usages", ".*", "a regexp to match packages to count function usages in")
+	flag.StringVar(&analysisScope, "scope", ".*", "a regexp to match packages who's functions should be displayed")
+	flag.BoolVar(&includeStdPkgs, "std", false, "if functions from standard packages should be included in analysis")
+
+	flag.Parse()
+	usagesMatcher = regexp.MustCompile(usages)
+	scopeMatcher = regexp.MustCompile(analysisScope)
+
 	config := &loader.Config{}
-	if _, err := config.FromArgs(flag.Args(), false); err != nil {
-		return fmt.Errorf("cloud not get package from args: %s", flag.Args())
+
+	for _, importpath := range flag.Args() {
+		config.Import(importpath)
 	}
+
 	program, err := config.Load()
 	if err != nil {
 		return fmt.Errorf("error loading: %v", err)
 	}
+
 	prog := ssa.Create(program, 0)
 	prog.BuildAll()
-	funs := ssautil.AllFunctions(prog)
-	pkgs := prog.AllPackages()
+
 	calls := map[string]int{}
-	v := &CallCounter{calls}
+	// create a map of names to function values to use later
+	fnNames := map[string]*ssa.Function{}
+
+	// AllFunctions list all functions reachable by this set of programs.
+	funcs := ssautil.AllFunctions(prog)
+	pkgs := prog.AllPackages()
+	if len(pkgs) == 0 {
+		return fmt.Errorf("no packages specified")
+	}
+
+	for fn := range funcs {
+
+		name := funcName(fn)
+		fnNames[name] = fn
+		if includeStdPkgs || !inStandardPackages(fn) {
+			calls[name] = 0
+		}
+	}
+
+	// the visitor will track function usages as it walks the ssa tree
+	v := &visitor{calls, make(map[interface{}]bool)}
+
 	for _, pkg := range pkgs {
 		pkgPath := pkg.Object.Path()
-		if !pkgRegexp.MatchString(pkgPath) {
+		if !usagesMatcher.MatchString(pkgPath) {
 			continue
 		}
-		for f, _ := range funs {
-			if f == nil {
-				continue
+
+		// given a top level function, walk it looking for function usages
+		walkFunc := func(fn *ssa.Function) {
+			if fn.Pkg.Object.Path() != pkgPath {
+				return
 			}
-			if f.Pkg == nil {
-				continue
-			}
-			if f.Pkg.Object.Path() != pkgPath {
-				continue
-			}
-			rel := f.RelString(nil)
-			_, ok := calls[rel]
-			if !ok {
-				calls[rel] = 0
-			}
-			for _, block := range f.Blocks {
+			for _, block := range fn.Blocks {
 				for i := range block.Instrs {
-					WalkInstr(v, block.Instrs[i])
+					v.walkInstr(block.Instrs[i])
 				}
 			}
-			if f.Recover != nil {
-				for i := range f.Recover.Instrs {
-					WalkInstr(v, f.Recover.Instrs[i])
+			if fn.Recover != nil {
+				for i := range fn.Recover.Instrs {
+					v.walkInstr(fn.Recover.Instrs[i])
 				}
 			}
-			for i := range f.AnonFuncs {
-				WalkValue(v, f.AnonFuncs[i])
+			for i := range fn.AnonFuncs {
+				v.walkValue(fn.AnonFuncs[i])
+			}
+			return
+		}
+
+		for _, mem := range pkg.Members {
+			switch mem := mem.(type) {
+			case *ssa.Function:
+				walkFunc(mem)
+			case *ssa.Type:
+				// if the member is a *ssa.Type walk all methods on that type
+				namedType, ok := mem.Type().(*types.Named)
+				if !ok {
+					panic("global type is not a named type!")
+				}
+				for i := 0; i < namedType.NumMethods(); i++ {
+					fn := prog.FuncValue(namedType.Method(i))
+					walkFunc(fn)
+				}
+			case *ssa.Global:
 			}
 		}
 	}
-	fmt.Println("USAGE:")
 	max := 0
 	for _, n := range calls {
 		if n > max {
 			max = n
 		}
 	}
+
+	shouldPrint := func(fn *ssa.Function) bool {
+		for _, pkg := range funcPackages(fn) {
+			if scopeMatcher.MatchString(pkg) {
+				return true
+			}
+		}
+		return false
+	}
+
 	max = int(math.Floor(math.Log10(float64(max)))) + 1
 	formatter := fmt.Sprintf("%%0%dd %%s", max)
 	s := []string{}
@@ -138,233 +217,14 @@ func doMain() error {
 		if strings.Contains(name, "$") {
 			continue
 		}
-		s = append(s, fmt.Sprintf(formatter, n, name))
+		fn := fnNames[name]
+		if shouldPrint(fn) {
+			s = append(s, fmt.Sprintf(formatter, n, name))
+		}
 	}
 	sort.Strings(s)
 	for i := range s {
 		fmt.Println(s[i])
 	}
 	return nil
-}
-
-// Hack to avoid infinite recursion
-var phiVisited = []*ssa.Phi{}
-
-func WalkInstr(v Visitor, ins ssa.Instruction) {
-	if ins == nil || v == nil {
-		return
-	}
-	v = v.VisitInstr(ins)
-	if v == nil {
-		return
-	}
-	switch x := ins.(type) {
-	case *ssa.BinOp:
-		WalkValue(v, x.X)
-		WalkValue(v, x.Y)
-	case *ssa.Call:
-		common := x.Common()
-		if common == nil {
-			return
-		}
-		WalkValue(v, common.Value)
-		for i := range common.Args {
-			WalkValue(v, common.Args[i])
-		}
-	case *ssa.ChangeInterface:
-		WalkValue(v, x.X)
-	case *ssa.ChangeType:
-		WalkValue(v, x.X)
-	case *ssa.Convert:
-		WalkValue(v, x.X)
-	case *ssa.DebugRef:
-		WalkValue(v, x.X)
-	case *ssa.Defer:
-		WalkValue(v, x.Call.Value)
-	case *ssa.Extract:
-		WalkValue(v, x.Tuple)
-	case *ssa.Field:
-		WalkValue(v, x.X)
-	case *ssa.FieldAddr:
-		WalkValue(v, x.X)
-	case *ssa.Go:
-		WalkValue(v, x.Call.Value)
-	case *ssa.If:
-		WalkValue(v, x.Cond)
-	case *ssa.Index:
-		WalkValue(v, x.X)
-		WalkValue(v, x.Index)
-	case *ssa.IndexAddr:
-		WalkValue(v, x.X)
-		WalkValue(v, x.Index)
-	case *ssa.Lookup:
-		WalkValue(v, x.X)
-		WalkValue(v, x.Index)
-	case *ssa.MakeChan:
-		WalkValue(v, x.Size)
-	case *ssa.MakeClosure:
-		WalkValue(v, x.Fn)
-		for i := range x.Bindings {
-			WalkValue(v, x.Bindings[i])
-		}
-	case *ssa.MakeInterface:
-		WalkValue(v, x.X)
-	case *ssa.MakeMap:
-		WalkValue(v, x.Reserve)
-	case *ssa.MakeSlice:
-		WalkValue(v, x.Len)
-		WalkValue(v, x.Cap)
-	case *ssa.MapUpdate:
-		WalkValue(v, x.Map)
-		WalkValue(v, x.Key)
-		WalkValue(v, x.Value)
-	case *ssa.Next:
-		WalkValue(v, x.Iter)
-	case *ssa.Panic:
-		WalkValue(v, x.X)
-	case *ssa.Phi:
-		for _, addr := range phiVisited {
-			if addr == x {
-				return
-			}
-		}
-		phiVisited = append(phiVisited, x)
-		for _, edge := range x.Edges {
-			WalkValue(v, edge)
-		}
-	case *ssa.Range:
-		WalkValue(v, x.X)
-	case *ssa.Return:
-		for i := range x.Results {
-			WalkValue(v, x.Results[i])
-		}
-	case *ssa.Select:
-		for _, state := range x.States {
-			WalkValue(v, state.Chan)
-			WalkValue(v, state.Send)
-		}
-	case *ssa.Send:
-		WalkValue(v, x.Chan)
-		WalkValue(v, x.X)
-	case *ssa.Slice:
-		for _, val := range []ssa.Value{x.X, x.Low, x.High, x.Max} {
-			WalkValue(v, val)
-		}
-	case *ssa.Store:
-		WalkValue(v, x.Addr)
-		WalkValue(v, x.Val)
-	case *ssa.TypeAssert:
-		WalkValue(v, x.X)
-	case *ssa.UnOp:
-		WalkValue(v, x.X)
-	}
-}
-
-func WalkValue(v Visitor, val ssa.Value) {
-	if val == nil || v == nil {
-		return
-	}
-	v = v.VisitValue(val)
-	if v == nil {
-		return
-	}
-	switch x := val.(type) {
-	case *ssa.BinOp:
-		WalkValue(v, x.X)
-		WalkValue(v, x.Y)
-	case *ssa.Call:
-		common := x.Common()
-		if common == nil {
-			return
-		}
-		WalkValue(v, common.Value)
-		for i := range common.Args {
-			WalkValue(v, common.Args[i])
-		}
-	case *ssa.ChangeInterface:
-		WalkValue(v, x.X)
-	case *ssa.ChangeType:
-		WalkValue(v, x.X)
-	case *ssa.Convert:
-		WalkValue(v, x.X)
-	case *ssa.Extract:
-		WalkValue(v, x.Tuple)
-	case *ssa.Field:
-		WalkValue(v, x.X)
-	case *ssa.FieldAddr:
-		WalkValue(v, x.X)
-	case *ssa.Function:
-		for i := range x.Params {
-			WalkValue(v, x.Params[i])
-		}
-		for i := range x.FreeVars {
-			WalkValue(v, x.FreeVars[i])
-		}
-		for i := range x.Locals {
-			WalkValue(v, x.Locals[i])
-		}
-		for _, block := range x.Blocks {
-			for i := range block.Instrs {
-				WalkInstr(v, block.Instrs[i])
-			}
-		}
-		if x.Recover != nil {
-			for i := range x.Recover.Instrs {
-				WalkInstr(v, x.Recover.Instrs[i])
-			}
-		}
-		for i := range x.AnonFuncs {
-			WalkValue(v, x.AnonFuncs[i])
-		}
-	case *ssa.Index:
-		WalkValue(v, x.X)
-		WalkValue(v, x.Index)
-	case *ssa.IndexAddr:
-		WalkValue(v, x.X)
-		WalkValue(v, x.Index)
-	case *ssa.Lookup:
-		WalkValue(v, x.X)
-		WalkValue(v, x.Index)
-	case *ssa.MakeChan:
-		WalkValue(v, x.Size)
-	case *ssa.MakeClosure:
-		WalkValue(v, x.Fn)
-		for i := range x.Bindings {
-			WalkValue(v, x.Bindings[i])
-		}
-	case *ssa.MakeInterface:
-		WalkValue(v, x.X)
-	case *ssa.MakeMap:
-		WalkValue(v, x.Reserve)
-	case *ssa.MakeSlice:
-		WalkValue(v, x.Len)
-		WalkValue(v, x.Cap)
-	case *ssa.Next:
-		WalkValue(v, x.Iter)
-	case *ssa.Phi:
-		for _, addr := range phiVisited {
-			if addr == x {
-				return
-			}
-		}
-		phiVisited = append(phiVisited, x)
-		for _, edge := range x.Edges {
-			WalkValue(v, edge)
-		}
-	case *ssa.Range:
-		WalkValue(v, x.X)
-	case *ssa.Select:
-		for _, state := range x.States {
-			WalkValue(v, state.Chan)
-			WalkValue(v, state.Send)
-		}
-	case *ssa.Slice:
-		for _, val := range []ssa.Value{x.X, x.Low, x.High, x.Max} {
-			WalkValue(v, val)
-		}
-	case *ssa.TypeAssert:
-		WalkValue(v, x.X)
-	case *ssa.UnOp:
-		WalkValue(v, x.X)
-	}
 }
