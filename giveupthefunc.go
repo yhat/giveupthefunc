@@ -16,16 +16,6 @@ import (
 	"golang.org/x/tools/go/types"
 )
 
-var usage = `giveupthefunc [flags] [list of packages]`
-
-func main() {
-	err := doMain()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "giveupthefunc: %s\n", err)
-		os.Exit(1)
-	}
-}
-
 // Generate the list of standard packages
 //go:generate /bin/bash -c ./genpkgs.sh
 
@@ -99,28 +89,52 @@ var (
 	scopeMatcher   *regexp.Regexp
 )
 
-func doMain() error {
+func regexpOr(str []string) string {
+	sli := make([]string, len(str))
+	for i, s := range str {
+		sli[i] = regexp.QuoteMeta(s)
+	}
+	return "(" + strings.Join(sli, "|") + ")"
+}
 
+func fatalf(format string, a ...interface{}) {
+	fmt.Fprintf(os.Stderr, format, a...)
+	os.Exit(2)
+}
+
+func main() {
 	var analysisScope string
 	var usages string
 
-	flag.StringVar(&usages, "usages", ".*", "a regexp to match packages to count function usages in")
-	flag.StringVar(&analysisScope, "scope", ".*", "a regexp to match packages who's functions should be displayed")
+	flag.StringVar(&usages, "usages", "", "a regexp to match packages to count function usages in, usage defaults to matching all import arguments")
+	flag.StringVar(&analysisScope, "scope", "", "a regexp to match packages who's function counds should be displayed, scope defaults to matching all import arguments")
 	flag.BoolVar(&includeStdPkgs, "std", false, "if functions from standard packages should be included in analysis")
 
 	flag.Parse()
+	args := flag.Args()
+
+	if len(args) == 0 {
+		fatalf("usage: giveupthefunc [flags] [list of import paths]")
+	}
+
+	if usages == "" {
+		usages = regexpOr(args)
+	}
+	if analysisScope == "" {
+		analysisScope = regexpOr(args)
+	}
 	usagesMatcher = regexp.MustCompile(usages)
 	scopeMatcher = regexp.MustCompile(analysisScope)
 
 	config := &loader.Config{}
 
-	for _, importpath := range flag.Args() {
+	for _, importpath := range args {
 		config.Import(importpath)
 	}
 
 	program, err := config.Load()
 	if err != nil {
-		return fmt.Errorf("error loading: %v", err)
+		fatalf("error loading: %v", err)
 	}
 
 	prog := ssa.Create(program, 0)
@@ -134,7 +148,7 @@ func doMain() error {
 	funcs := ssautil.AllFunctions(prog)
 	pkgs := prog.AllPackages()
 	if len(pkgs) == 0 {
-		return fmt.Errorf("no packages specified")
+		fatalf("no packages specified")
 	}
 
 	for fn := range funcs {
@@ -226,5 +240,4 @@ func doMain() error {
 	for i := range s {
 		fmt.Println(s[i])
 	}
-	return nil
 }
